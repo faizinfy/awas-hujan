@@ -4,6 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Awas Hujan</title>
+  <meta name="description" content="Live rain radar and rain alerts for your saved places.">
+  <meta name="theme-color" content="#1769e0">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="manifest" href="manifest.webmanifest">
+  <!-- iPhone "Add to Home Screen" -->
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="Awas Hujan">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
   <style>
     :root {
@@ -123,6 +134,41 @@
     td:last-child, td:nth-child(2) { text-align: right; font-variant-numeric: tabular-nums; }
     #panelToggle { display: none; }
 
+    /* Saved places */
+    #placesMenu {
+      position: absolute;
+      top: 64px;
+      left: 56px;
+      z-index: 1001;
+      width: 260px;
+      max-height: 50%;
+      overflow: auto;
+      padding: 10px 12px;
+    }
+    #placesMenu[hidden], #placeActions[hidden] { display: none; }
+    .place-item { display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--border); }
+    .place-item:last-child { border-bottom: none; }
+    .place-item button { border: none; background: none; }
+    .place-item .go { flex: 1; text-align: left; padding: 7px 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .place-item .go:hover { color: var(--accent); }
+    .place-item .del { color: var(--muted); }
+    .place-item .del:hover { color: #d33; }
+    #placeActions { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+    #placeActions .row { margin-top: 0; align-items: center; }
+    #placeActions input {
+      flex: 1;
+      min-width: 0;
+      font: inherit;
+      color: var(--fg);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 8px;
+    }
+    #placeActions .chips { margin-top: 8px; }
+    .chips button { padding: 2px 10px; font-size: 12px; border-radius: 999px; }
+    .leaflet-tooltip.place-label { font-weight: 600; padding: 1px 6px; }
+
     .leaflet-container { background: #aad3df; }
     .leaflet-bar a { background: var(--bg); color: var(--fg); border-color: var(--border); }
 
@@ -139,6 +185,7 @@
       }
       #panel.collapsed > :not(#panelToggle) { display: none; }
       #panelToggle { display: block; float: right; padding: 2px 8px; }
+      #placesMenu { left: 16px; right: 16px; width: auto; }
       #player { bottom: 16px; }
     }
   </style>
@@ -149,7 +196,13 @@
   <div id="header" class="card">
     <h1>☔ Awas Hujan</h1>
     <button id="locateBtn" class="primary" title="Use my location">📍 My location</button>
+    <button id="placesBtn" aria-expanded="false" aria-controls="placesMenu">★ Places</button>
     <label>Radar opacity <input id="opacity" type="range" min="0.2" max="1" step="0.1" value="0.7"></label>
+  </div>
+
+  <div id="placesMenu" class="card" hidden>
+    <div class="section-title" style="margin-top:0">Saved places</div>
+    <div id="placesList"></div>
   </div>
 
   <div id="panel" class="card">
@@ -158,6 +211,7 @@
       <h2>Rain forecast</h2>
       <p class="hint">Tap <b>My location</b> or click anywhere on the map to see the rain forecast for that spot.</p>
     </div>
+    <div id="placeActions" hidden></div>
   </div>
 
   <div id="player" class="card">
@@ -178,9 +232,35 @@
     const RADAR_REFRESH_MS = 5 * 60 * 1000;
     const FORECAST_REFRESH_MS = 10 * 60 * 1000;
     const RAIN_THRESHOLD_MM_PER_15MIN = 0.1;
+    const DEFAULT_VIEW = { lat: 4.2, lng: 102.0, zoom: 6 }; // Peninsular Malaysia
+    const STORAGE_KEYS = { view: 'awasHujan.view', places: 'awasHujan.places' };
+
+    // localStorage can be unavailable (private mode, blocked site data), so never let it break the page.
+    function loadJson(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch {
+        return fallback;
+      }
+    }
+
+    function saveJson(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
+    }
+
+    const storedView = loadJson(STORAGE_KEYS.view, null);
+    const initialView = storedView && [storedView.lat, storedView.lng, storedView.zoom].every(Number.isFinite)
+      ? storedView
+      : DEFAULT_VIEW;
 
     const map = L.map('map', { zoomControl: true, worldCopyJump: true })
-      .setView([4.2, 102.0], 6); // Peninsular Malaysia
+      .setView([initialView.lat, initialView.lng], initialView.zoom);
+
+    map.on('moveend', () => {
+      const center = map.getCenter().wrap();
+      saveJson(STORAGE_KEYS.view, { lat: center.lat, lng: center.lng, zoom: map.getZoom() });
+    });
 
     // Basemap: OpenStreetMap Humanitarian style hosted by OSM France
     // (tile.openstreetmap.org rejects localhost/dev referers; CARTO now needs an API key).
@@ -396,19 +476,163 @@
       }
     }
 
-    function selectPoint(lat, lon, label) {
-      forecastPoint = { lat, lon, label };
+    function selectPoint(lat, lon, label, placeId = null) {
+      forecastPoint = { lat, lon, label, placeId };
       if (pointMarker) pointMarker.setLatLng([lat, lon]);
       else pointMarker = L.marker([lat, lon]).addTo(map);
       panelBody.innerHTML = `<h2>${escapeHtml(label)}</h2><p class="hint">Loading forecast…</p>`;
       panel.classList.remove('collapsed');
       panelToggle.textContent = '–';
+      renderPlaceActions();
       updateForecast();
       clearInterval(forecastTimer);
       forecastTimer = setInterval(updateForecast, FORECAST_REFRESH_MS);
     }
 
-    map.on('click', e => selectPoint(e.latlng.lat, e.latlng.lng, 'Selected point'));
+    map.on('click', e => {
+      closePlacesMenu();
+      selectPoint(e.latlng.lat, e.latlng.lng, 'Selected point');
+    });
+
+    // ---------- Saved places (Home, Work, …) ----------
+    const placesBtn = document.getElementById('placesBtn');
+    const placesMenu = document.getElementById('placesMenu');
+    const placesList = document.getElementById('placesList');
+    const placeActions = document.getElementById('placeActions');
+    const placesLayer = L.layerGroup().addTo(map);
+    const QUICK_NAMES = ['Home', 'Work', 'School'];
+
+    let places = loadJson(STORAGE_KEYS.places, [])
+      .filter(p => p && typeof p.name === 'string' && Number.isFinite(p.lat) && Number.isFinite(p.lon));
+
+    function persistPlaces() {
+      saveJson(STORAGE_KEYS.places, places);
+    }
+
+    function selectPlace(place) {
+      closePlacesMenu();
+      map.setView([place.lat, place.lon], Math.max(map.getZoom(), 8));
+      selectPoint(place.lat, place.lon, place.name, place.id);
+    }
+
+    function savePlace(name) {
+      const point = forecastPoint;
+      const trimmed = name.trim();
+      if (!point || !trimmed) return;
+      // Saving under an existing name (e.g. "Home") moves that place instead of adding a duplicate.
+      const existing = places.find(p => p.name.toLowerCase() === trimmed.toLowerCase());
+      const place = existing || { id: Date.now().toString(36) };
+      Object.assign(place, { name: trimmed, lat: point.lat, lon: point.lon });
+      if (!existing) places.push(place);
+      persistPlaces();
+      point.placeId = place.id;
+      point.label = place.name;
+      renderPlaces();
+      renderPlaceActions();
+      updateForecast();
+    }
+
+    function removePlace(id) {
+      const place = places.find(p => p.id === id);
+      if (!place || !confirm(`Remove "${place.name}" from saved places?`)) return;
+      places = places.filter(p => p.id !== id);
+      persistPlaces();
+      renderPlaces();
+      if (forecastPoint?.placeId === id) {
+        forecastPoint.placeId = null;
+        forecastPoint.label = 'Selected point';
+        renderPlaceActions();
+        updateForecast();
+      }
+    }
+
+    function renderPlaces() {
+      placesLayer.clearLayers();
+      for (const place of places) {
+        L.circleMarker([place.lat, place.lon], {
+          radius: 7, color: '#fff', weight: 2, fillColor: '#1769e0', fillOpacity: 1,
+          bubblingMouseEvents: false,
+        })
+          .bindTooltip(escapeHtml(place.name), { permanent: true, direction: 'right', offset: [8, 0], className: 'place-label' })
+          .on('click', () => selectPlace(place))
+          .addTo(placesLayer);
+      }
+
+      placesList.innerHTML = places.length
+        ? places.map(p => `
+            <div class="place-item">
+              <button class="go" data-id="${p.id}">★ ${escapeHtml(p.name)}</button>
+              <button class="del" data-id="${p.id}" aria-label="Remove ${escapeHtml(p.name)}" title="Remove">✕</button>
+            </div>`).join('')
+        : '<p class="hint" style="margin:0">No saved places yet. Pick a spot on the map, then tap <b>Save this place</b>.</p>';
+    }
+
+    function renderPlaceActions() {
+      const point = forecastPoint;
+      placeActions.hidden = !point;
+      if (!point) return;
+
+      const place = places.find(p => p.id === point.placeId);
+      if (place) {
+        placeActions.innerHTML = `
+          <div class="row">
+            <span style="flex:1">★ Saved as <b>${escapeHtml(place.name)}</b></span>
+            <button id="removePlaceBtn">Remove</button>
+          </div>`;
+        document.getElementById('removePlaceBtn').addEventListener('click', () => removePlace(place.id));
+      } else {
+        placeActions.innerHTML = '<button id="savePlaceBtn">☆ Save this place</button>';
+        document.getElementById('savePlaceBtn').addEventListener('click', showSaveForm);
+      }
+    }
+
+    function showSaveForm() {
+      placeActions.innerHTML = `
+        <form id="savePlaceForm" class="row">
+          <input id="placeNameInput" maxlength="40" placeholder="Name, e.g. Home" required>
+          <button type="submit" class="primary">Save</button>
+          <button type="button" id="cancelSaveBtn">Cancel</button>
+        </form>
+        <div class="row chips">
+          ${QUICK_NAMES.map(n => `<button type="button" data-name="${n}">${n}</button>`).join('')}
+        </div>`;
+      const input = document.getElementById('placeNameInput');
+      input.focus();
+      document.getElementById('savePlaceForm').addEventListener('submit', e => {
+        e.preventDefault();
+        savePlace(input.value);
+      });
+      document.getElementById('cancelSaveBtn').addEventListener('click', renderPlaceActions);
+      placeActions.querySelectorAll('.chips button').forEach(btn =>
+        btn.addEventListener('click', () => { input.value = btn.dataset.name; input.focus(); }));
+    }
+
+    function openPlacesMenu() {
+      const header = document.getElementById('header');
+      placesMenu.style.top = `${header.offsetTop + header.offsetHeight + 8}px`;
+      placesMenu.hidden = false;
+      placesBtn.setAttribute('aria-expanded', 'true');
+    }
+
+    function closePlacesMenu() {
+      placesMenu.hidden = true;
+      placesBtn.setAttribute('aria-expanded', 'false');
+    }
+
+    placesBtn.addEventListener('click', () => (placesMenu.hidden ? openPlacesMenu() : closePlacesMenu()));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closePlacesMenu(); });
+    placesList.addEventListener('click', e => {
+      const btn = e.target.closest('button[data-id]');
+      if (!btn) return;
+      if (btn.classList.contains('del')) {
+        removePlace(btn.dataset.id);
+      } else {
+        const place = places.find(p => p.id === btn.dataset.id);
+        if (place) selectPlace(place);
+      }
+    });
+
+    renderPlaces();
 
     document.getElementById('locateBtn').addEventListener('click', () => {
       if (!navigator.geolocation) { alert('Geolocation is not supported by this browser.'); return; }
